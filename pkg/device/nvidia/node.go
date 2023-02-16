@@ -21,9 +21,8 @@ import (
 	"fmt"
 	"math/bits"
 
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"k8s.io/klog"
-
-	"tkestack.io/nvml"
 )
 
 //SchedulerCache contains allocatable resource of GPU
@@ -68,7 +67,7 @@ var (
 func NewNvidiaNode(t *NvidiaTree) *NvidiaNode {
 	node := &NvidiaNode{
 		vchildren: make(map[int]*NvidiaNode),
-		ntype:     nvml.TOPOLOGY_UNKNOWN,
+		ntype:     60,
 		tree:      t,
 		Meta: DeviceMeta{
 			ID: nodeIndex,
@@ -128,8 +127,8 @@ func (n *NvidiaNode) String() string {
 		return "PXB"
 	case nvml.TOPOLOGY_HOSTBRIDGE:
 		return "PHB"
-	case nvml.TOPOLOGY_CPU:
-		return "CPU"
+	//case nvml.TOPOLOGY_CPU:
+	//	return "CPU"
 	case nvml.TOPOLOGY_SYSTEM:
 		return "SYS"
 	}

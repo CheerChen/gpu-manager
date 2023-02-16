@@ -20,6 +20,7 @@ package nvidia
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -28,9 +29,10 @@ import (
 
 	"tkestack.io/gpu-manager/pkg/config"
 	"tkestack.io/gpu-manager/pkg/device"
+	"tkestack.io/gpu-manager/pkg/utils"
 
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"k8s.io/klog"
-	"tkestack.io/nvml"
 )
 
 const (
@@ -110,7 +112,7 @@ func (t *NvidiaTree) Update() {
 		return
 	}
 
-	if err := nvml.Init(); err != nil {
+	if r := nvml.Init(); r != 0 {
 		return
 	}
 
@@ -168,15 +170,15 @@ func (t *NvidiaTree) addNode(node *NvidiaNode) {
 }
 
 func (t *NvidiaTree) parseFromLibrary() error {
-	if err := nvml.Init(); err != nil {
-		return err
+	if r := nvml.Init(); r != 0 {
+		return errors.New(nvml.ErrorString(r))
 	}
 
 	defer nvml.Shutdown()
 
-	num, err := nvml.DeviceGetCount()
-	if err != nil {
-		return err
+	num, r := nvml.DeviceGetCount()
+	if r != 0 {
+		return errors.New(nvml.ErrorString(r))
 	}
 
 	klog.V(2).Infof("Detect %d gpu cards", num)
@@ -184,36 +186,37 @@ func (t *NvidiaTree) parseFromLibrary() error {
 	nodes := make(LevelMap)
 	t.leaves = make([]*NvidiaNode, num)
 
-	for i := 0; i < int(num); i++ {
-		dev, _ := nvml.DeviceGetHandleByIndex(uint(i))
-		_, _, totalMem, _ := dev.DeviceGetMemoryInfo()
-		pciInfo, _ := dev.DeviceGetPciInfo()
-		minorID, _ := dev.DeviceGetMinorNumber()
-		uuid, _ := dev.DeviceGetUUID()
+	for i := 0; i < num; i++ {
+
+		dev, _ := nvml.DeviceGetHandleByIndex(i)
+		mi2, _ := dev.GetMemoryInfo_v2()
+		pciInfo, _ := dev.GetPciInfo()
+		minorID, _ := dev.GetMinorNumber()
+		uuid, _ := dev.GetUUID()
 
 		n := t.allocateNode(i)
 		n.AllocatableMeta.Cores = HundredCore
-		n.AllocatableMeta.Memory = int64(totalMem)
-		n.Meta.TotalMemory = totalMem
-		n.Meta.BusId = pciInfo.BusID
-		n.Meta.MinorID = int(minorID)
+		n.AllocatableMeta.Memory = int64(mi2.Total)
+		n.Meta.TotalMemory = mi2.Total
+		n.Meta.BusId = utils.B2S(pciInfo.BusId[:])
+		n.Meta.MinorID = minorID
 		n.Meta.UUID = uuid
 
 		t.addNode(n)
 	}
 
-	for cardA := uint(0); cardA < num; cardA++ {
+	for cardA := 0; cardA < num; cardA++ {
 		devA, _ := nvml.DeviceGetHandleByIndex(cardA)
 		for cardB := cardA + 1; cardB < num; cardB++ {
 			devB, _ := nvml.DeviceGetHandleByIndex(cardB)
-			ntype, err := nvml.DeviceGetTopologyCommonAncestor(devA, devB)
-			if err != nil {
-				return err
+			ntype, r := nvml.DeviceGetTopologyCommonAncestor(devA, devB)
+			if r != 0 {
+				return errors.New(nvml.ErrorString(r))
 			}
 
-			multi, err := devA.DeviceGetMultiGpuBoard()
-			if err != nil {
-				return err
+			multi, r := devA.GetMultiGpuBoard()
+			if r != 0 {
+				return errors.New(nvml.ErrorString(r))
 			}
 
 			if multi > 0 && ntype == nvml.TOPOLOGY_INTERNAL {
@@ -561,19 +564,21 @@ func (t *NvidiaTree) updateNode(idx int) *NvidiaNode {
 	nvml.Init()
 	defer nvml.Shutdown()
 
-	dev, _ := nvml.DeviceGetHandleByIndex(uint(idx))
-	pids, _ := dev.DeviceGetComputeRunningProcesses(MaxProcess)
-	util, _ := dev.DeviceGetAverageGPUUsage(t.samplePeriod)
+	dev, _ := nvml.DeviceGetHandleByIndex(idx)
+	//pids, _ := dev.GetComputeRunningProcesses()
+
+	lastUtilizationTimestamp := uint64(time.Now().Add(-1*t.samplePeriod).UnixNano() / 1000)
+	processes, _ := dev.GetProcessUtilization(lastUtilizationTimestamp)
 
 	node := t.leaves[idx]
 
 	node.Meta.Pids = make([]uint, 0)
 	node.Meta.UsedMemory = 0
-	node.Meta.Utilization = util
 
-	for _, pid := range pids {
-		node.Meta.Pids = append(node.Meta.Pids, pid.Pid)
-		node.Meta.UsedMemory += pid.UsedGPUMemory
+	for _, process := range processes {
+		node.Meta.Pids = append(node.Meta.Pids, uint(process.Pid))
+		node.Meta.UsedMemory += uint64(process.MemUtil)
+		node.Meta.Utilization += uint(process.SmUtil)
 	}
 
 	return node
@@ -624,7 +629,8 @@ func resetGPUFeature(node *NvidiaNode, realMode bool) error {
 		return nil
 	}
 
-	if err := nvml.Init(); err != nil {
+	if r := nvml.Init(); r != 0 {
+		err := errors.New(nvml.ErrorString(r))
 		return err
 	}
 
@@ -632,17 +638,19 @@ func resetGPUFeature(node *NvidiaNode, realMode bool) error {
 
 	// GPU in the real world has a BusId
 	if len(node.Meta.BusId) > 0 {
-		dev, _ := nvml.DeviceGetHandleByIndex(uint(node.Meta.ID))
-		err := dev.DeviceSetComputeMode(nvml.COMPUTEMODE_DEFAULT)
-		if err != nil {
+		dev, _ := nvml.DeviceGetHandleByIndex(node.Meta.ID)
+		r := dev.SetComputeMode(nvml.COMPUTEMODE_DEFAULT)
+		if r != 0 {
+			err := errors.New(nvml.ErrorString(r))
 			klog.V(3).Infof("can't set compute mode to default for %s, %v", node.Meta.BusId, err)
 			return err
 		}
 
-		curMode, _, err := dev.DeviceGetEccMode()
-		if err != nil {
+		curMode, _, r := dev.GetEccMode()
+		if r != 0 {
+			err := errors.New(nvml.ErrorString(r))
 			// If we got Not Supported error, that means this GPU card is not enabled for ECC
-			if strings.Contains(err.Error(), "Not Supported") {
+			if strings.Contains(nvml.ErrorString(r), "Not Supported") {
 				node.pendingReset = false
 				return nil
 			}
@@ -651,12 +659,14 @@ func resetGPUFeature(node *NvidiaNode, realMode bool) error {
 			return err
 		}
 
-		if curMode {
-			if err = dev.DeviceClearEccErrorCounts(nvml.VOLATILE_ECC); err != nil {
+		if curMode == nvml.FEATURE_ENABLED {
+			if r = dev.ClearEccErrorCounts(nvml.VOLATILE_ECC); r != 0 {
+				err := errors.New(nvml.ErrorString(r))
 				klog.V(3).Infof("can't clear volatile ecc for %s, %v", node.Meta.BusId, err)
 				return err
 			}
-			if err = dev.DeviceClearEccErrorCounts(nvml.AGGREGATE_ECC); err != nil {
+			if r = dev.ClearEccErrorCounts(nvml.AGGREGATE_ECC); r != 0 {
+				err := errors.New(nvml.ErrorString(r))
 				klog.V(3).Infof("can't clear volatile ecc for %s, %v", node.Meta.BusId, err)
 				return err
 			}

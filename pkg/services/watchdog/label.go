@@ -27,7 +27,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/klog"
-	"tkestack.io/nvml"
+	//"tkestack.io/nvml"
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
 )
 
 const (
@@ -50,23 +51,23 @@ type stringFunc string
 var modelFn = modelFunc{}
 
 func (m modelFunc) GetLabel() (model string) {
-	if err := nvml.Init(); err != nil {
-		klog.Warningf("Can't initialize nvml library, %v", err)
+	if r := nvml.Init(); r != 0 {
+		klog.Warningf("Can't initialize nvml library, %v", nvml.ErrorString(r))
 		return
 	}
 
 	defer nvml.Shutdown()
 
 	// Assume all devices on this node are the same model
-	dev, err := nvml.DeviceGetHandleByIndex(0)
-	if err != nil {
-		klog.Warningf("Can't get device 0 information, %v", err)
+	dev, r := nvml.DeviceGetHandleByIndex(0)
+	if r != 0 {
+		klog.Warningf("Can't get device 0 information, %v", nvml.ErrorString(r))
 		return
 	}
 
-	rawName, err := dev.DeviceGetName()
-	if err != nil {
-		klog.Warningf("Can't get device name, %v", err)
+	rawName, r := dev.GetName()
+	if r != 0 {
+		klog.Warningf("Can't get device name, %v", nvml.ErrorString(r))
 		return
 	}
 

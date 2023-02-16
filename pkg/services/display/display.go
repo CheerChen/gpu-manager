@@ -19,6 +19,7 @@ package display
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -39,7 +40,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/api/core/v1"
 	"k8s.io/klog"
-	"tkestack.io/nvml"
+	//"tkestack.io/nvml"
+	"github.com/NVIDIA/go-nvml/pkg/nvml"
 )
 
 //Display is used to show GPU device usage
@@ -191,26 +193,31 @@ func (disp *Display) getDeviceUsage(pidsInCont []int, deviceIdx int) *displayapi
 	nvml.Init()
 	defer nvml.Shutdown()
 
-	dev, err := nvml.DeviceGetHandleByIndex(uint(deviceIdx))
-	if err != nil {
+	dev, r := nvml.DeviceGetHandleByIndex(deviceIdx)
+	if r != 0 {
+		err := errors.New(nvml.ErrorString(r))
 		klog.Warningf("can't find device %d, error %s", deviceIdx, err)
 		return nil
 	}
 
-	processSamples, err := dev.DeviceGetProcessUtilization(1024, time.Second)
-	if err != nil {
+	lastUtilizationTimestamp := uint64(time.Now().Add(-1*time.Second).UnixNano() / 1000)
+	processSamples, r := dev.GetProcessUtilization(lastUtilizationTimestamp)
+	if r != 0 {
+		err := errors.New(nvml.ErrorString(r))
 		klog.Warningf("can't get processes utilization from device %d, error %s", deviceIdx, err)
 		return nil
 	}
 
-	processOnDevices, err := dev.DeviceGetComputeRunningProcesses(1024)
-	if err != nil {
+	processOnDevices, r := dev.GetComputeRunningProcesses()
+	if r != 0 {
+		err := errors.New(nvml.ErrorString(r))
 		klog.Warningf("can't get processes info from device %d, error %s", deviceIdx, err)
 		return nil
 	}
 
-	busID, err := dev.DeviceGetPciInfo()
-	if err != nil {
+	busID, r := dev.GetPciInfo()
+	if r != 0 {
+		err := errors.New(nvml.ErrorString(r))
 		klog.Warningf("can't get pci info from device %d, error %s", deviceIdx, err)
 		return nil
 	}
@@ -221,7 +228,7 @@ func (disp *Display) getDeviceUsage(pidsInCont []int, deviceIdx int) *displayapi
 
 	usedMemory := uint64(0)
 	usedPids := make([]int32, 0)
-	usedGPU := uint(0)
+	usedGPU := uint32(0)
 	for _, info := range processOnDevices {
 		idx := sort.Search(len(pidsInCont), func(pivot int) bool {
 			return pidsInCont[pivot] >= int(info.Pid)
@@ -229,7 +236,7 @@ func (disp *Display) getDeviceUsage(pidsInCont []int, deviceIdx int) *displayapi
 
 		if idx < len(pidsInCont) && pidsInCont[idx] == int(info.Pid) {
 			usedPids = append(usedPids, int32(pidsInCont[idx]))
-			usedMemory += info.UsedGPUMemory
+			usedMemory += info.UsedGpuMemory
 		}
 	}
 
@@ -244,7 +251,7 @@ func (disp *Display) getDeviceUsage(pidsInCont []int, deviceIdx int) *displayapi
 	}
 
 	return &displayapi.DeviceInfo{
-		Id:      busID.BusID,
+		Id:      utils.B2S(busID.BusId[:]),
 		CardIdx: fmt.Sprintf("%d", deviceIdx),
 		Gpu:     float32(usedGPU),
 		Mem:     float32(usedMemory >> 20),
